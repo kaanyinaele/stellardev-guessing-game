@@ -1,3 +1,4 @@
+use eframe::egui;
 use std::{io, process, fs};
 use std::time::Instant;
 use rand::Rng;
@@ -15,70 +16,165 @@ struct HighScore {
     date: DateTime<Local>,
 }
 
-/// Main game loop and logic
-/// - Generates secret number based on difficulty
-/// - Handles user input and game flow
-/// - Returns io::Result for proper error propagation
-fn main() -> io::Result<()> {
-    println!("Number Guessing Game!");
-    
-    loop {  // Outer game loop
-        // Load and display high scores
-        display_high_scores()?;
-        
-        // Get difficulty and generate secret number
-        let difficulty = choose_difficulty();
-        let secret = generate_secret_number(difficulty);
-        
-        let start_time = Instant::now();
-        let mut attempts = 0;
-        
-        // Inner loop for current round
-        loop {
-            println!("Enter your guess (1-{}) or 'q' to quit:", difficulty);
-            
-            // Handle input with error recovery
-            let guess = match get_guess() {
-                Ok(num) => num,
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    continue;
-                }
-            };
+struct GuessingGame {
+    secret_number: u32,
+    current_guess: String,
+    message: String,
+    attempts: u32,
+    difficulty: u32,
+    game_won: bool,
+    high_scores: Vec<HighScore>,
+    start_time: std::time::Instant,
+}
 
-            attempts += 1;
-
-            // Compare guess to secret number
-            match guess.cmp(&secret) {
-                Ordering::Less => println!("The Secret Number is Higher!"),
-                Ordering::Greater => println!("The Secret Number is Lower!"),
-                Ordering::Equal => {
-                    let duration = start_time.elapsed();
-                    println!("Correct! The secret number was {}", secret);
-                    println!("You took {} attempts and {:.2} seconds!", 
-                        attempts, duration.as_secs_f64());
-                    
-                    // Save high score
-                    save_score(HighScore {
-                        attempts,
-                        seconds: duration.as_secs_f64(),
-                        difficulty,
-                        date: Local::now(),
-                    })?;
-                    
-                    display_high_scores()?;
-                    break;  // Break inner loop to ask about playing again
-                }
-            }
-        }
-
-        // Ask if player wants to continue
-        if !ask_play_again()? {
-            println!("Thanks for playing!");
-            break;  // Break outer loop to end game
+impl Default for GuessingGame {
+    fn default() -> Self {
+        Self {
+            secret_number: rand::thread_rng().gen_range(1..=100),
+            current_guess: String::new(),
+            message: "Guess a number between 1 and 100!".to_string(),
+            attempts: 0,
+            difficulty: 100,
+            game_won: false,
+            high_scores: load_high_scores().unwrap_or_default(),
+            start_time: std::time::Instant::now(),
         }
     }
-    Ok(())
+}
+
+impl GuessingGame {
+    fn new_game(&mut self) {
+        self.secret_number = rand::thread_rng().gen_range(1..=self.difficulty);
+        self.current_guess.clear();
+        self.message = format!("Guess a number between 1 and {}!", self.difficulty);
+        self.attempts = 0;
+        self.game_won = false;
+        self.start_time = std::time::Instant::now();
+    }
+
+    fn check_guess(&mut self) {
+        if let Ok(guess) = self.current_guess.parse::<u32>() {
+            if !self.game_won {
+                self.attempts += 1;
+                
+                if guess < 1 || guess > self.difficulty {
+                    self.message = format!("Please enter a number between 1 and {}!", self.difficulty);
+                    return;
+                }
+
+                match guess.cmp(&self.secret_number) {
+                    std::cmp::Ordering::Less => self.message = "Higher!".to_string(),
+                    std::cmp::Ordering::Greater => self.message = "Lower!".to_string(),
+                    std::cmp::Ordering::Equal => {
+                        let duration = self.start_time.elapsed();
+                        self.game_won = true;
+                        self.message = format!(
+                            "Correct! You won in {} attempts and {:.2} seconds!",
+                            self.attempts,
+                            duration.as_secs_f64()
+                        );
+                        
+                        // Save high score
+                        let score = HighScore {
+                            attempts: self.attempts,
+                            seconds: duration.as_secs_f64(),
+                            difficulty: self.difficulty,
+                            date: Local::now(),
+                        };
+                        if let Ok(()) = save_score(score) {
+                            self.high_scores = load_high_scores().unwrap_or_default();
+                        }
+                    }
+                }
+            }
+        } else {
+            self.message = "Please enter a valid number!".to_string();
+        }
+        self.current_guess.clear();
+    }
+}
+
+impl eframe::App for GuessingGame {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Number Guessing Game");
+            ui.add_space(20.0);
+
+            // Difficulty selection
+            ui.horizontal(|ui| {
+                ui.label("Difficulty:");
+                if ui.button("Easy (50)").clicked() && !self.game_won {
+                    self.difficulty = 50;
+                    self.new_game();
+                }
+                if ui.button("Medium (100)").clicked() && !self.game_won {
+                    self.difficulty = 100;
+                    self.new_game();
+                }
+                if ui.button("Hard (200)").clicked() && !self.game_won {
+                    self.difficulty = 200;
+                    self.new_game();
+                }
+            });
+
+            ui.add_space(20.0);
+
+            // Game input
+            ui.horizontal(|ui| {
+                let text_edit = ui.text_edit_singleline(&mut self.current_guess);
+                text_edit.request_focus();
+                
+                if ui.button("Guess").clicked() || 
+                   (text_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                    self.check_guess();
+                }
+            });
+
+            if ui.button("New Game").clicked() {
+                self.new_game();
+            }
+
+            ui.add_space(10.0);
+            ui.label(&self.message);
+            ui.add_space(20.0);
+
+            // High Scores
+            ui.heading("High Scores");
+            egui::Grid::new("high_scores")
+                .num_columns(4)
+                .spacing([40.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("Attempts");
+                    ui.label("Time");
+                    ui.label("Difficulty");
+                    ui.label("Date");
+                    ui.end_row();
+
+                    for score in &self.high_scores {
+                        ui.label(score.attempts.to_string());
+                        ui.label(format!("{:.2}s", score.seconds));
+                        ui.label(score.difficulty.to_string());
+                        ui.label(score.date.format("%Y-%m-%d %H:%M").to_string());
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 600.0]),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Guessing Game",
+        options,
+        Box::new(|_cc| Box::new(GuessingGame::default())),
+    )
 }
 
 /// Handles user input and validation
